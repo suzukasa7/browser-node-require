@@ -1,12 +1,10 @@
 # browser-node-require
 Load the module of Node.js from the browser
 
-<font style="color:#ee1111;">
-Caution
+__!!! CAUTION !!!__
 
-Do not use this module in a production environment.
-This is written for development.
-</font>
+__Do not use this module in a production environment.
+This is written for DEVELOPMENT.__
 
 ## Usage
     <script src="***/node_modules/browser-node-require/lib/index.js"></script>

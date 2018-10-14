@@ -206,7 +206,6 @@
                 if (hardResreshing) throw new Error("HardRefreshing has already been started");
                 hardResreshing = true;
 
-                require.clearResolveCache();
                 const span = document.body.appendChild(document.createElement("span"));
                 span.style.display = "none";
                 const loadedStates: { url: string, loaded: number }[] = [];
