@@ -6,16 +6,17 @@
         return filename.substring(0, filename.lastIndexOf("/") + 1);
     }
 
+    const loadedFiles: { url: string, inNode: boolean }[] = [];
     const readFileSync = (() => {
         const cache: { [x: string]: string | null } = {};
-        return (url: string): string | null => {
+        return (url: string, inNode = false): string | null => {
             if (url in cache) return cache[url];
             const xhr = new XMLHttpRequest();
             xhr.open("GET", url, false);
             xhr.send();
             const result = xhr.status === 200 ? xhr.responseText : null;
             cache[url] = result;
-            if (result !== null) iframes.add(url);
+            if (result !== null) loadedFiles.push({ url, inNode });
             return result;
         };
     })();
@@ -30,29 +31,7 @@
         f.apply(thisArg, args.map(x => x.value));
     }
 
-    const iframes = (() => {
-        const span = document.createElement("span");
-        span.style.display = "none";
-        if (document.body) {
-            document.body.appendChild(span)
-        } else {
-            document.addEventListener("DOMContentLoaded", e => document.body.appendChild(span));
-        }
-        const iframes: HTMLIFrameElement[] = [];
-        return {
-            add: (url: string): void => {
-                if (iframes.some(iframe => iframe.src === url)) return;
-                const iframe = span.appendChild(document.createElement("iframe"));
-                iframes.push(iframe);
-                iframe.src = url;
-            },
-            reloadAll: (includeNode = false) => {
-                for (let iframe of iframes) {
-                    if (iframe.contentWindow && (includeNode || !/\/node_modules\//.test(iframe.src))) iframe.contentWindow.location.reload(true);
-                }
-            }
-        };
-    })();
+    let hardResreshing = false;
 
     class Module {
         exports: any = {};
@@ -60,6 +39,7 @@
         loaded = false;
         readonly paths: string[] = [];
         readonly children: Module[] = [];
+        private _inNode = false;
         private constructor(
             readonly id: string,
             readonly parent: Module | undefined = undefined
@@ -71,6 +51,7 @@
             const url = Module.resolve(this, request);
             if (url in Module.cache) return Module.cache[url].exports;
             const module = new Module(url);
+            module._inNode = this._inNode || !/^\.\.?(\/.*|)$/.test(request);
 
             this.children.pop();
             Module.load(module, url);
@@ -82,13 +63,15 @@
 
         private static resolve(module: Module, request: string): string {
             if (module.filename === null) throw new Error("Cannot resolve requests from the module not loaded");
+            const isRelativePathRequest = /^\.\.?(\/.*|)$/.test(request);
+            const inNode = module._inNode || !isRelativePathRequest;
             const cachedUrl = Module.resolveCache.get(module.filename, request);
             if (cachedUrl !== null) {
-                if (readFileSync(cachedUrl) === null) Module.resolveCache.remove(module.filename, request); else return cachedUrl;
+                if (readFileSync(cachedUrl, inNode) === null) Module.resolveCache.remove(module.filename, request); else return cachedUrl;
             }
-            if (/^\.\.?(\/.*|)$/.test(request)) {
+            if (isRelativePathRequest) {
                 // relative path
-                const r = Module.resolveAsFile(new URL(request, module.filename).href, true);
+                const r = Module.resolveAsFile(new URL(request, module.filename).href, true, inNode);
                 if (r !== null) {
                     Module.resolveCache.set(module.filename, request, r);
                     return r;
@@ -97,7 +80,7 @@
                 // node_modules
                 const includeSlach = request.indexOf("/") >= 0;
                 for (let nodePath of module.paths) {
-                    const r = includeSlach ? Module.resolveAsFile(nodePath + "/" + request, true) : Module.resolveAsDirectory(nodePath + "/" + request, false);
+                    const r = includeSlach ? Module.resolveAsFile(nodePath + "/" + request, true, inNode) : Module.resolveAsDirectory(nodePath + "/" + request, false, inNode);
                     if (r !== null) {
                         Module.resolveCache.set(module.filename, request, r);
                         return r;
@@ -107,35 +90,35 @@
             throw new Error(`Cannot find module '${request}'`);
         }
 
-        private static resolveAsFile(url: string, alsoAsDirectory = false): string | null {
+        private static resolveAsFile(url: string, alsoAsDirectory = false, inNode = false): string | null {
             const endsWithSlash = /\/$/.test(url);
             const hasExtension = /\/[^\/]*\.[^\/\.]+$/.test(url);
             if (!endsWithSlash) {
-                if (hasExtension && readFileSync(url) !== null) return url;
-                if (readFileSync(url + ".js") !== null) return url + ".js";
-                if (readFileSync(url + ".json") !== null) return url + ".json";
+                if (hasExtension && readFileSync(url, inNode) !== null) return url;
+                if (readFileSync(url + ".js", inNode) !== null) return url + ".js";
+                if (readFileSync(url + ".json", inNode) !== null) return url + ".json";
             }
             if (alsoAsDirectory) {
-                const r = Module.resolveAsDirectory(url, true);
+                const r = Module.resolveAsDirectory(url, true, inNode);
                 if (r !== null) return r;
             }
-            if (!endsWithSlash && !hasExtension && readFileSync(url) !== null) return url;
+            if (!endsWithSlash && !hasExtension && readFileSync(url, inNode) !== null) return url;
             return null;
         }
 
-        private static resolveAsDirectory(url: string, searchIndex = false): string | null {
+        private static resolveAsDirectory(url: string, searchIndex = false, inNode = false): string | null {
             const endsWithSlash = /\/$/.test(url);
             if (!endsWithSlash) url += "/";
-            const packageInfoSource = readFileSync(url + "package.json");
+            const packageInfoSource = readFileSync(url + "package.json", inNode);
             if (packageInfoSource !== null) {
                 const packageInfo = JSON.parse(packageInfoSource);
                 if ("main" in packageInfo) {
-                    const r = Module.resolveAsFile(new URL(packageInfo.main, url).href, true);
+                    const r = Module.resolveAsFile(new URL(packageInfo.main, url).href, true, inNode);
                     if (r !== null) return r;
                 }
             }
             if (searchIndex) {
-                const r = Module.resolveAsFile(url + "index", false);
+                const r = Module.resolveAsFile(url + "index", false, inNode);
                 if (r !== null) return r;
             }
             return null;
@@ -219,8 +202,33 @@
 
             require.clearResolveCache = () => Module.resolveCache.clear();
             require.hardRefresh = (includeNode = false) => {
-                iframes.reloadAll(includeNode);
-                location.reload(true);
+                if (!document.body) throw new Error("Cannot do hardRefresh before DOM is loaded");
+                if (hardResreshing) throw new Error("HardRefreshing has already been started");
+                hardResreshing = true;
+
+                require.clearResolveCache();
+                const span = document.body.appendChild(document.createElement("span"));
+                span.style.display = "none";
+                const loadedStates: { url: string, loaded: number }[] = [];
+                for (let file of loadedFiles) {
+                    if (includeNode || !file.inNode) {
+                        const iframe = span.appendChild(document.createElement("iframe"));
+                        const loadedState = { url: file.url, loaded: 0 };
+                        loadedStates.push(loadedState);
+                        iframe.addEventListener("load", e => {
+                            if (loadedState.loaded === 0) {
+                                loadedState.loaded = 1;
+                                iframe.contentWindow!.location.reload(true);
+                            } else if (loadedState.loaded === 1) {
+                                loadedState.loaded = 2;
+                                if (loadedStates.every(state => state.loaded === 2)) {
+                                    location.reload(true);
+                                }
+                            }
+                        });
+                        iframe.src = file.url;
+                    }
+                }
             };
 
             return mainModule;
